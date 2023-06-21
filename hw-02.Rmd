@@ -1,0 +1,465 @@
+---
+title: "SDS Homework 2"
+author: "Alvetreti, Corrias, Di Nino, Omar "
+date: "07-01-2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library("animation")
+library("dplyr")
+library("Hmisc")
+library("confintr")
+library("igraph")
+library("DescTools")
+library("Matrix")
+library("shiny")
+library('shinyWidgets')
+library("magick")
+library("MASS")
+library('r2r')
+load("hw2_data.RData")
+```
+
+## Processing the data
+
+We realized the data were coming from two different labs: Caltech and Trinity.
+
+Since they had different scales we decided we had to perform a normalization to " flatten " the lab effect.
+
+Hence we decided to group on these labs and then normalize column-wise the features.
+
+```{r normalization, echo=TRUE}
+
+normalize <- function(data){
+  
+  # Get data names  
+  data_names <- names(data)
+  
+  # Select the indices of each lab
+  data_caltech_indices <- grep("caltech", data_names)
+  data_trinity_indices <- grep("trinity", data_names)
+  
+  # Divide into two different lists
+  data_caltech <- data[data_caltech_indices]
+  data_trinity <- data[data_trinity_indices]
+  
+  # Make them two dataframes
+  data_caltech <- bind_rows(data_caltech)
+  data_trinity <- bind_rows(data_trinity)
+  
+  # Normalize each ROI 
+  data_caltech <- as.data.frame(scale(data_caltech))
+  data_trinity <- as.data.frame(scale(data_trinity))
+  
+  # Bind again the data
+  data <- bind_rows(list(data_caltech, data_trinity))
+  
+  # Split again in twelve patients
+  data<- split(data, rep(1:12,145))
+  
+  return(data)
+  
+}
+
+asd_sel <- normalize(asd_sel)
+td_sel <- normalize(td_sel)
+
+```
+
+## Pooling
+
+We decided to pool each dataset into a $116$x$116$ matrix, first computing the correlation matrix for each patient, and then performing the mean between them.
+
+Our decision was driven by two main reasons:
+
+$1)$ intuitively it seemed the best way to lose the least amount of information per patient.
+
+$2)$ since we wanted to use normal CI we needed the warranty that each correlation behaved ( at least asymptotically ) as a Gaussian. Performing the mean, thanks to the CLT, guarantees that.
+
+```{r pooling, echo=TRUE}
+
+cor_pooling <- function(data){
+  corr <- matrix(0,116,116)
+  for(i in 1:12){
+    corr <- corr + cor(as.matrix(data[[i]]))
+  }
+  corr <- corr/12
+  return(corr)
+}
+
+asd_corr <- cor_pooling(asd_sel)
+td_corr <- cor_pooling(td_sel)
+
+```
+
+## Graphs
+
+```{r functions, echo=TRUE}
+
+# Functions that checks for an intersection between to intervals
+check_edge <- function (x, y) (max(x[1], y[1]) > min(x[2], y[2]))
+
+
+# Asymptotic CI using fisher z-transform
+fisher_ci <- function(r, n, conf_level = 0.95, bonferroni = TRUE) {
+  
+  # Apply Bonferroni correction
+  if (bonferroni)
+    conf_level <- conf_level/choose(n, 2)
+  
+  # Calculate the standard error of the correlation
+  se <- (1 / sqrt(n - 3))
+  
+  # Calculate the z-value for the given confidence level
+  z <- qnorm(1 - conf_level / 2)
+  
+  # Calculate the lower and upper bounds of the confidence interval
+  lower <- atanh(r) - z * se
+  upper <- atanh(r) + z * se
+  
+  # Back transform
+  lower <- tanh(lower)
+  upper <- tanh(upper)
+  
+  # Return the confidence interval as a vector
+  return(c(lower, upper))
+}
+
+
+# Get adjacency matrix from correlation matrix and a threshold
+adj_matrix <- function(mat, threshold = 0.5, bonferroni = TRUE) {
+  
+  adj_mat <- matrix(0, nrow=116, ncol=116) # Initialize matrix
+  
+  n <- dim(mat)[1] # Get mat dimension
+  
+  # Create the interval [-threshold, threshold]
+  th_interval <- c(-threshold, threshold)
+  
+  for (i in 1:116) {
+    for (j in 1:116) {
+      
+      # Get confidence interval for the selected columns
+      asd_interval <- fisher_ci(mat[i,j], 116, 0.05, bonferroni = bonferroni)
+      
+      # Fill adjacency matrix
+      adj_mat[i,j] <- check_edge(asd_interval, th_interval)
+    }
+  }
+  
+  return(adj_mat)
+}
+
+```
+
+```{r first graph,echo=FALSE}
+
+asd_adj<-adj_matrix(asd_corr,threshold = 0.15,bonferroni=TRUE)
+td_adj<-adj_matrix(td_corr,threshold = 0.15,bonferroni=TRUE)
+first_asd_graph <- graph_from_adjacency_matrix(asd_adj, mode = "undirected", diag = F)
+first_td_graph <- graph_from_adjacency_matrix(td_adj, mode = "undirected",diag = F)
+     
+```
+
+```{r chunk-label, animation.hook = "gifski"}
+  for (i in seq(0,0.8,0.05)){
+    
+    asd_adj<-adj_matrix(asd_corr,threshold = i,bonferroni=TRUE)
+    td_adj<-adj_matrix(td_corr,threshold = i,bonferroni=TRUE)
+
+    asd_graph <- graph_from_adjacency_matrix(asd_adj, mode = "undirected", diag =     F)
+    td_graph <- graph_from_adjacency_matrix(td_adj, mode = "undirected",diag = F)
+    par(mfrow=c(1,2),cex=1,font=1)
+  
+    par(mfrow=c(1, 2))
+
+    set.seed(23)
+    plot(td_graph, vertex.size = 5, edge.width=5, edge.color = "blue",
+     layout = layout_nicely(first_td_graph, dim = 2),vertex.label=NA, main="TD correlation Graph")
+    set.seed(23)
+    plot(asd_graph, vertex.size = 5, edge.width=5, edge.color = "red",
+    layout = layout_nicely(first_td_graph, dim = 2),vertex.label= NA,main="ASD correlation Graph")
+    
+    
+    mtext(paste("Threshold=",i,sep = " "), side = 3, line = -21, outer = TRUE)
+    
+  }
+
+```
+
+
+## Partial Correlation
+```{r utils, echo=FALSE}
+
+# For the partial correlation we use a variant of the adj_matrix method
+adj_matrix <- function(mat, threshold = 0.5) {
+  
+  # Initialize matrix
+  adj_mat <- matrix(0, nrow=116, ncol=116) 
+  
+  # Create the interval [-threshold, threshold]
+  th_interval <- c(-threshold, threshold)
+  
+  for (i in 1:116) {
+    for (j in 1:116) {
+      # Get confidence interval for the selected ROI
+      interval <- unlist(mat[i,j])
+      
+      # Fill adjacency matrix
+      adj_mat[i,j] <- check_edge(interval, th_interval)
+    }
+  }
+  
+  return(adj_mat)
+}
+
+```
+
+## Pooling (mean method)
+
+For the partial correlation, since we wanted to use bootstrap we need a sample to resample R times.In order to accomplish this we used a different pooling method. After checking the distribution of the data we decided to summarize all patient for each group using the mean.
+
+```{r pooling_v2, echo=TRUE}
+
+# Pooling
+pooling <- function(data){
+  
+  # Set up a 3D matrix to store all observation for each patient
+  mat3D <- array(NA, c(145, 116, 12))
+  
+  # Build it
+  for (i in 1:12) {
+    mat3D[,,i] <- as.matrix(data[[i]])
+  }
+  
+  # Return the mean of the patients
+  return(apply(mat3D, M = c(1, 2, 0), mean))
+  
+}
+
+asd_data <- pooling(asd_sel)
+td_data <- pooling(td_sel)
+```
+
+## Building CI from Partial Correlation Matrix
+
+For the partial correlation we implemented a bootstrap function which estimates the distribution of the partial correlations from our dataset using the percentile method to get the confidence intervals.
+
+In order to do this we also implemented from scratch a method to calculate the partial correlation using the "matrix inversion" method. The main problem using this approach is that the covariance matrix is not invertible for high dimensional settings like the one we are working on. To solve this we used the ginv function which uses the Moore-Penrose generalized inverse which be seen as a form of shrinkage in the sense that it reduces the size or magnitude of the inverse matrix.
+
+```{r bootstrap, echo=TRUE}
+
+# Partial correlation from scratch
+partial_corr <- function(mat) {
+  
+  # Calculate the covariance matrix
+  cov_mat <- cov(mat)
+  
+  # Invert the covariance matrix
+  inv_cov_mat <- ginv(cov_mat)
+  
+  # Divide the elements of the inverted matrix by the square root 
+  # of the product of the diagonal elements
+  return(inv_cov_mat / sqrt(diag(inv_cov_mat) %*% t(diag(inv_cov_mat))))
+}
+
+
+# Build CI for partial correlation using bootstrap
+bootstrap <- function(data, R = 1000, conf = 0.95) {
+  n <- nrow(data)
+  results <- array(NA, c(116, 116, R))
+  
+  for (i in 1:R) {
+    # Sample the data with replacement
+    sample_index <- sample(n, replace = TRUE)
+    sample <- data[sample_index, ]
+    
+    # Compute the statistic on the bootstrapped sample
+    corr_mat <- partial_corr(sample)
+    
+    # Store the result in the list
+    results[,,i] <- corr_mat
+  }
+  
+  get_bounds <- function(cell_list, R, conf) {
+    
+    sorted_list <- sort(cell_list)
+    
+    # Compute the lower and upper bounds of the confidence interval
+    lower_index <- floor((1 - conf) * R)
+    upper_index <- ceiling(conf * R)
+    
+    lower <- sorted_list[lower_index]    
+    upper <- sorted_list[upper_index]
+    
+    # Return the confidence interval as a vector
+    return(list(lower, upper))
+  }
+  
+  intervals <- apply(results, M = c(1, 2, 0), get_bounds, R = R, conf = conf)
+
+  return(intervals)
+}
+
+
+asd_intervals <- bootstrap(as.matrix(asd_data), 1000, 0.95)
+td_intervals <- bootstrap(as.matrix(td_data), 1000, 0.95)
+```
+
+## Partial Correlation Graphs
+
+As we can see from the graphs below we notice that the correlation obtained with the bootstrap is pretty weak because the percentiles that estimates the bounds of the CI are at the far end extremity of the bootstrap distro.
+
+This is inherent to the bootstrap procedure because it fails in estimating the tails of the real distribution.
+
+```{r partial_cor_graphs, echo=FALSE}
+
+t <- 0.005
+
+adj_mat_asd <- adj_matrix(asd_intervals, threshold = t)
+adj_mat_td <- adj_matrix(td_intervals, threshold = t)
+
+asd_graph <- graph_from_adjacency_matrix(adj_mat_asd, mode = "undirected", diag = F)
+td_graph <- graph_from_adjacency_matrix(adj_mat_td, mode = "undirected",diag = F)
+
+par(mfrow=c(1, 2))
+
+set.seed(23)
+plot(td_graph, vertex.size = 5, edge.width=5, edge.color = "blue",
+     layout = layout_nicely(td_graph, dim = 2),vertex.label=NA, main="TD correlation Graph")
+set.seed(23)
+plot(asd_graph, vertex.size = 5, edge.width=5, edge.color = "red",
+     layout = layout_nicely(td_graph, dim = 2),vertex.label=NA,main="ASD correlation Graph")
+mtext("Treshold= 0.005", side = 3, line = -21, outer = TRUE)
+
+```
+
+
+Edges are found only for nearly zero thresholds.
+
+
+## A second approach
+
+After checking the results obtained using the bootstrap, we decided to try the same "normal" approach utilized in the first point: we approximated the CI using a normal.
+Again, we needed a Gaussian behavior, hence we decided to compute the same pooling used for the Pearson correlation: we first computed the partial correlation for the data of each patient and then performed the mean between them. 
+
+Finally we estimate the CI through Fisher Z-transform and the usual normal approximation.
+
+```{r new functions, echo=TRUE}
+partial_corr <- function(mat) {
+  
+  # Calculate the covariance matrix
+  cov_mat <- cov(mat)
+  
+  # Invert the covariance matrix
+  inv_cov_mat <- ginv(cov_mat)
+  
+  # Divide the elements of the inverted matrix by the square root 
+  # of the product of the diagonal elements
+  return(inv_cov_mat / sqrt(diag(inv_cov_mat) %*% t(diag(inv_cov_mat))))
+}
+
+
+bonferronis_correction <- function(alpha, D) {
+  return (alpha/choose(D,2))
+}
+
+
+normal_par_ci <- function(r,N,D,confidence) {
+  confidence <- bonferronis_correction(confidence, N)
+  stim <- Z_mean(r)
+  se <- Z_se(N,D)
+  quant <- qnorm(1-confidence/2)
+  return (c(tanh(stim-quant*se), tanh(stim+quant*se)))
+}
+
+
+Z_mean <- function(x) {
+  return(1/2*(log((1+x)/(1-x))))
+}
+
+
+Z_se <- function(N,D) {
+  g <- D-2
+  return(1/(N-g-3))
+}
+
+```
+
+```{r pooling v3,echo=TRUE}
+par_cor_pooling <- function(data){
+  corr <- matrix(0,116,116)
+  for(i in 1:12){
+    corr <- corr + partial_corr(as.matrix(data[[i]]))
+  }
+  corr <- corr/12
+  return(corr)
+}
+
+asd_part_corr <- par_cor_pooling(asd_sel)
+td_part_corr <- par_cor_pooling(td_sel)
+
+```
+
+
+Here's the final result: 
+
+```{r new plot, animation.hook = "gifski"}
+
+for(t in seq(0,0.8,0.05)){
+  
+part_adj_asd <- matrix(NA, nrow = 116, ncol = 116)
+part_adj_td <- matrix(NA, nrow=116, ncol=116)
+
+th_interval <- c(-t,t)
+
+for (i in 1:116) {
+  for (j in 1:116) {
+    # Get confidence interval for the selected columns
+    asd_interval <- normal_par_ci(asd_part_corr[i,j], 145, 116, 0.05)
+    td_interval <- normal_par_ci(td_part_corr[i,j], 145, 116, 0.05)
+    
+    # Fill matrix with intersection result
+    part_adj_asd[i,j] <- check_edge(asd_interval, th_interval)
+    part_adj_td[i,j] <- check_edge(td_interval, th_interval)
+  }
+}
+
+
+new_asd_graph <- graph_from_adjacency_matrix(part_adj_asd, mode = "undirected", diag = F)
+new_td_graph <- graph_from_adjacency_matrix(part_adj_td, mode = "undirected",diag = F)
+
+par(mfrow=c(1, 2))
+
+set.seed(23)
+plot(new_td_graph, vertex.size = 5, edge.width=5, edge.color = "blue",
+     layout = layout_nicely(first_td_graph, dim = 2),vertex.label=NA, main="TD correlation Graph")
+set.seed(23)
+plot(new_asd_graph, vertex.size = 5, edge.width=5, edge.color = "red",
+     layout = layout_nicely(first_td_graph, dim = 2),vertex.label=NA,main="ASD correlation Graph")
+
+mtext(paste("Threshold=",t,sep = " "), side = 3, line = -21, outer = TRUE)
+
+
+}
+
+```
+
+## Conclusions
+
+
+In order to study the relationships between ROIs we explored three different approeaches.
+
+First we started building confidence intervals using the mean of the Pearson correlation matrices and the Fisher Z-transform method. We also applied Bonferroni correction to control multiplicity during edges discovery and found out the importance of it.
+
+Then we implemented the partial correlation approach.
+
+Using the boostrap method we encountered too wide intervals which led to a difficulty in finding edges in the graphs except for thresholds nearly to 0 (where we still had few of them).
+
+For this reason, we decided to delve our work on partial correlation using normal approximation which brought more meaningful results.
+
+Between the two correlations, we believe that the partial correlation is the most interesting because it identify the unique contribution of each variable to the relationship between the other two variables and can be used to identify possible causal relationships between variables.
+
+
